@@ -32,7 +32,11 @@ function clone<T>(value: T): T {
 }
 
 function ensureDataDir() {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+  } catch {
+    // Non-fatal: session state will be in-memory only for this run
+  }
 }
 
 function defaultSession(sessionId: string): PersistedSession {

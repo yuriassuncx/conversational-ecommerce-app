@@ -5,7 +5,11 @@ import { DATA_DIR } from "./runtimePaths.js";
 export const ANALYTICS_LOG_PATH = path.join(DATA_DIR, "analytics-events.jsonl");
 
 function ensureDataDir() {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+  } catch {
+    // Non-fatal: analytics events will be skipped if dir is not writable
+  }
 }
 
 function sanitizeValue(value: unknown, depth = 0): unknown {
