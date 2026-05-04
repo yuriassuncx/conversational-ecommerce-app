@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: farm-rio-ecommerce-mcp
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    plan: free
+    region: oregon
+    healthCheckPath: /healthz
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
+      - key: FARM_RIO_VTEX_BASE_URL
+        value: https://www.farmrio.com.br
+      - key: ECOMMERCE_DATA_DIR
+        value: /data

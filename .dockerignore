@@ -1,0 +1,17 @@
+.git
+.github
+.vscode
+.idea
+node_modules
+.pnpm-store
+.data
+assets
+coverage
+dist
+build
+.vite
+*.log
+pnpm-debug.log
+npm-debug.log
+yarn-error.log
+ngrok-v3-stable-linux-amd64.tgz
