@@ -107,7 +107,7 @@ const ASSETS_DIR = path.resolve(ROOT_DIR, "assets");
 
 const WIDGET_NAME = "ecommerce-shop";
 const WIDGET_URI = "ui://widget/ecommerce-shop.html";
-const MIME_TYPE = "text/html+skybridge";
+const MIME_TYPE = "text/html;profile=mcp-app";
 const SERVER_NAME = "farm-rio-ecommerce";
 const SERVER_VERSION = "1.0.0";
 const widgetCspDomains = {
@@ -152,7 +152,7 @@ const widgetHtml = readWidgetHtml();
 
 function descriptorMeta() {
   return {
-    "openai/outputTemplate": WIDGET_URI,
+    "ui/resourceUri": WIDGET_URI,
     "openai/toolInvocation/invoking": "Abrindo a Farm Rio…",
     "openai/toolInvocation/invoked": "Widget Farm Rio pronto",
     "openai/widgetAccessible": true,
