@@ -78,7 +78,11 @@ function loadCache() {
 function persistCache() {
   ensureDataDir();
   const serialized = Object.fromEntries(sessionCache.entries());
-  fs.writeFileSync(SESSION_STORE_PATH, JSON.stringify(serialized, null, 2), "utf8");
+  try {
+    fs.writeFileSync(SESSION_STORE_PATH, JSON.stringify(serialized, null, 2), "utf8");
+  } catch {
+    // Non-fatal: session persistence skipped if dir is not writable
+  }
 }
 
 export function getSessionSnapshot(sessionId: string): PersistedSession {

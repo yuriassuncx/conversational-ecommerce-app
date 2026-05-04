@@ -46,7 +46,11 @@ export function recordAnalyticsEvent(type: string, payload: Record<string, unkno
     ...payload,
   };
 
-  fs.appendFileSync(ANALYTICS_LOG_PATH, `${JSON.stringify(entry)}\n`, "utf8");
+  try {
+    fs.appendFileSync(ANALYTICS_LOG_PATH, `${JSON.stringify(entry)}\n`, "utf8");
+  } catch {
+    // Non-fatal: skip analytics write if dir is not writable
+  }
 }
 
 export function recordToolAnalytics({
