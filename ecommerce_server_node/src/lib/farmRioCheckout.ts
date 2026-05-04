@@ -7,6 +7,26 @@ const FARM_RIO_BASE_URL =
 const CHECKOUT_BASE_URL = new URL("/api/checkout/pub/orderForm/", FARM_RIO_BASE_URL);
 const REQUEST_TIMEOUT_MS = 8_000;
 
+// Cookie jar: VTEX checkout uses cookies (checkout.vtex.com, etc.) to track
+// the orderForm session. We persist cookies per-process so calls stay coherent.
+const cookieJar = new Map<string, string>();
+
+function buildCookieHeader(): string {
+  return [...cookieJar.entries()].map(([k, v]) => `${k}=${v}`).join("; ");
+}
+
+function updateCookieJar(setCookieHeaders: string[]): void {
+  for (const header of setCookieHeaders) {
+    const [pair] = header.split(";");
+    if (!pair) continue;
+    const eq = pair.indexOf("=");
+    if (eq < 0) continue;
+    const name = pair.slice(0, eq).trim();
+    const value = pair.slice(eq + 1).trim();
+    if (name) cookieJar.set(name, value);
+  }
+}
+
 export interface VtexOrderFormMessage {
   text?: string;
 }
@@ -163,18 +183,31 @@ async function invokeCheckout<T>(
   const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
   try {
+    const cookieHeader = buildCookieHeader();
     const response = await fetch(new URL(path, CHECKOUT_BASE_URL), {
       ...init,
       headers: {
         accept: "application/json",
         "content-type": "application/json",
+        origin: FARM_RIO_BASE_URL,
+        referer: `${FARM_RIO_BASE_URL}/`,
+        "user-agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        ...(cookieHeader ? { cookie: cookieHeader } : {}),
         ...(init.headers ?? {}),
       },
       signal: controller.signal,
     });
 
+    // Persist any Set-Cookie headers returned by VTEX
+    const setCookies = response.headers.getSetCookie?.() ?? [];
+    if (setCookies.length > 0) {
+      updateCookieJar(setCookies);
+    }
+
     if (!response.ok) {
-      throw new Error(`Farm Rio checkout ${path} failed with ${response.status}`);
+      const body = await response.text().catch(() => "");
+      throw new Error(`Farm Rio checkout ${path} failed with ${response.status}: ${body.slice(0, 200)}`);
     }
 
     return (await response.json()) as T;
