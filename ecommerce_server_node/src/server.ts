@@ -5,8 +5,9 @@
  * with a rich UI widget rendered inside ChatGPT.
  *
  * Endpoints:
- *   GET  /mcp          — SSE stream (MCP connection)
- *   POST /mcp/messages — MCP JSON-RPC messages
+ *   POST   /mcp — Streamable HTTP (MCP connection + messages)
+ *   GET    /mcp — SSE resumption (optional, for clients that need it)
+ *   DELETE /mcp — Close session
  *
  * Tools:
  *   search_products        — Full-text + intent search
@@ -33,12 +34,13 @@ import {
   type IncomingMessage,
   type ServerResponse,
 } from "node:http";
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { URL, fileURLToPath, pathToFileURL } from "node:url";
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import {
   CallToolRequestSchema,
   ListResourceTemplatesRequestSchema,
@@ -157,13 +159,18 @@ function descriptorMeta() {
   } as const;
 }
 
+// Cast helper: SDK v1.x requires mutable string[] in inputSchema.required,
+// but our schemas use `as const` which produces readonly arrays.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const toInputSchema = (s: unknown): Tool["inputSchema"] => s as any;
+
 const tools: Tool[] = [
   {
     name: "search_products",
     title: "Buscar Produtos Farm Rio",
     description:
       "Busca produtos Farm Rio por texto livre, intenção ou categoria. Suporta linguagem natural como 'vestido floral para festa', 'look casual de verão', 'algo mais barato'.",
-    inputSchema: searchProductsInputSchema,
+    inputSchema: toInputSchema(searchProductsInputSchema),
     _meta: descriptorMeta(),
     annotations: { destructiveHint: false, openWorldHint: false, readOnlyHint: true },
   },
@@ -171,7 +178,7 @@ const tools: Tool[] = [
     name: "get_product",
     title: "Ver Detalhe do Produto",
     description: "Exibe detalhes completos de um produto: descrição, medidas, fotos, parcelamento.",
-    inputSchema: getProductInputSchema,
+    inputSchema: toInputSchema(getProductInputSchema),
     _meta: descriptorMeta(),
     annotations: { destructiveHint: false, openWorldHint: false, readOnlyHint: true },
   },
@@ -179,7 +186,7 @@ const tools: Tool[] = [
     name: "list_categories",
     title: "Listar Categorias",
     description: "Lista as categorias reais disponíveis na Farm Rio via VTEX taxonomy.",
-    inputSchema: listCategoriesInputSchema,
+    inputSchema: toInputSchema(listCategoriesInputSchema),
     _meta: descriptorMeta(),
     annotations: { destructiveHint: false, openWorldHint: false, readOnlyHint: true },
   },
@@ -187,7 +194,7 @@ const tools: Tool[] = [
     name: "get_suggestions",
     title: "Sugestões de Busca",
     description: "Retorna sugestões de busca (autocomplete) baseadas no texto parcial digitado. Inspirado no VTEX intelligentSearch/suggestions.",
-    inputSchema: getSuggestionsInputSchema,
+    inputSchema: toInputSchema(getSuggestionsInputSchema),
     _meta: descriptorMeta(),
     annotations: { destructiveHint: false, openWorldHint: false, readOnlyHint: true },
   },
@@ -195,7 +202,7 @@ const tools: Tool[] = [
     name: "get_top_searches",
     title: "Tendências de Busca",
     description: "Retorna os termos mais buscados e tendências da loja. Inspirado no VTEX intelligentSearch/topsearches.",
-    inputSchema: getTopSearchesInputSchema,
+    inputSchema: toInputSchema(getTopSearchesInputSchema),
     _meta: descriptorMeta(),
     annotations: { destructiveHint: false, openWorldHint: false, readOnlyHint: true },
   },
@@ -203,7 +210,7 @@ const tools: Tool[] = [
     name: "add_to_cart",
     title: "Adicionar ao Carrinho",
     description: "Adiciona um produto ao carrinho de compras com tamanho e quantidade.",
-    inputSchema: addToCartInputSchema,
+    inputSchema: toInputSchema(addToCartInputSchema),
     _meta: descriptorMeta(),
     annotations: { destructiveHint: false, openWorldHint: false, readOnlyHint: false },
   },
@@ -211,7 +218,7 @@ const tools: Tool[] = [
     name: "remove_from_cart",
     title: "Remover do Carrinho",
     description: "Remove um item do carrinho de compras.",
-    inputSchema: removeFromCartInputSchema,
+    inputSchema: toInputSchema(removeFromCartInputSchema),
     _meta: descriptorMeta(),
     annotations: { destructiveHint: false, openWorldHint: false, readOnlyHint: false },
   },
@@ -219,7 +226,7 @@ const tools: Tool[] = [
     name: "update_item_quantity",
     title: "Atualizar Quantidade no Carrinho",
     description: "Altera a quantidade de um item no carrinho via delta relativo (+1 para adicionar, -1 para reduzir). Se o resultado for ≤ 0, o item é removido automaticamente. Inspirado no VTEX actions/cart/updateItems.",
-    inputSchema: updateItemQuantityInputSchema,
+    inputSchema: toInputSchema(updateItemQuantityInputSchema),
     _meta: descriptorMeta(),
     annotations: { destructiveHint: false, openWorldHint: false, readOnlyHint: false },
   },
@@ -227,7 +234,7 @@ const tools: Tool[] = [
     name: "view_cart",
     title: "Ver Carrinho",
     description: "Exibe o carrinho de compras atual com totais, descontos e frete.",
-    inputSchema: viewCartInputSchema,
+    inputSchema: toInputSchema(viewCartInputSchema),
     _meta: descriptorMeta(),
     annotations: { destructiveHint: false, openWorldHint: false, readOnlyHint: true },
   },
@@ -235,7 +242,7 @@ const tools: Tool[] = [
     name: "add_to_wishlist",
     title: "Salvar na Lista de Desejos",
     description: "Salva um produto na lista de desejos da sessão. Inspirado no VTEX actions/wishlist.",
-    inputSchema: addToWishlistInputSchema,
+    inputSchema: toInputSchema(addToWishlistInputSchema),
     _meta: descriptorMeta(),
     annotations: { destructiveHint: false, openWorldHint: false, readOnlyHint: false },
   },
@@ -243,7 +250,7 @@ const tools: Tool[] = [
     name: "view_wishlist",
     title: "Ver Lista de Desejos",
     description: "Exibe os produtos salvos na lista de desejos. Inspirado no VTEX loaders/wishlist.",
-    inputSchema: viewWishlistInputSchema,
+    inputSchema: toInputSchema(viewWishlistInputSchema),
     _meta: descriptorMeta(),
     annotations: { destructiveHint: false, openWorldHint: false, readOnlyHint: true },
   },
@@ -251,7 +258,7 @@ const tools: Tool[] = [
     name: "remove_from_wishlist",
     title: "Remover da Lista de Desejos",
     description: "Remove um produto da lista de desejos.",
-    inputSchema: removeFromWishlistInputSchema,
+    inputSchema: toInputSchema(removeFromWishlistInputSchema),
     _meta: descriptorMeta(),
     annotations: { destructiveHint: false, openWorldHint: false, readOnlyHint: false },
   },
@@ -259,7 +266,7 @@ const tools: Tool[] = [
     name: "apply_coupon",
     title: "Aplicar Cupom de Desconto",
     description: "Aplica um cupom real ao carrinho VTEX da Farm Rio e devolve o retorno da loja.",
-    inputSchema: applyCouponInputSchema,
+    inputSchema: toInputSchema(applyCouponInputSchema),
     _meta: descriptorMeta(),
     annotations: { destructiveHint: false, openWorldHint: false, readOnlyHint: false },
   },
@@ -267,7 +274,7 @@ const tools: Tool[] = [
     name: "apply_vendor_code",
     title: "Aplicar Código de Vendedor",
     description: "Aplica um código promocional real ao checkout VTEX da Farm Rio e devolve o retorno da loja.",
-    inputSchema: applyVendorCodeInputSchema,
+    inputSchema: toInputSchema(applyVendorCodeInputSchema),
     _meta: descriptorMeta(),
     annotations: { destructiveHint: false, openWorldHint: false, readOnlyHint: false },
   },
@@ -275,7 +282,7 @@ const tools: Tool[] = [
     name: "check_shipping",
     title: "Calcular Frete por CEP",
     description: "Calcula custo e prazo de entrega para o CEP informado.",
-    inputSchema: checkShippingInputSchema,
+    inputSchema: toInputSchema(checkShippingInputSchema),
     _meta: descriptorMeta(),
     annotations: { destructiveHint: false, openWorldHint: false, readOnlyHint: true },
   },
@@ -283,7 +290,7 @@ const tools: Tool[] = [
     name: "recommend_outfit",
     title: "Montar Look Completo",
     description: "Sugere peças que combinam com o produto selecionado para um look completo.",
-    inputSchema: recommendOutfitInputSchema,
+    inputSchema: toInputSchema(recommendOutfitInputSchema),
     _meta: descriptorMeta(),
     annotations: { destructiveHint: false, openWorldHint: false, readOnlyHint: true },
   },
@@ -291,7 +298,7 @@ const tools: Tool[] = [
     name: "get_order_history",
     title: "Ver Histórico de Pedidos",
     description: "Exibe os pedidos anteriores do usuário com status, itens e rastreamento. Inspirado no VTEX loaders/orders.",
-    inputSchema: getOrderHistoryInputSchema,
+    inputSchema: toInputSchema(getOrderHistoryInputSchema),
     _meta: descriptorMeta(),
     annotations: { destructiveHint: false, openWorldHint: false, readOnlyHint: true },
   },
@@ -494,13 +501,12 @@ export async function executeToolCall(toolName: string, args: Record<string, unk
   return result;
 }
 
-// ─── HTTP / SSE server ─────────────────────────────────────────────────────
+// ─── HTTP / Streamable HTTP server ────────────────────────────────────────
 
-type SessionRecord = { server: Server; transport: SSEServerTransport };
+type SessionRecord = { server: Server; transport: StreamableHTTPServerTransport };
 const sessions = new Map<string, SessionRecord>();
 
-const ssePath = "/mcp";
-const postPath = "/mcp/messages";
+const mcpPath = "/mcp";
 
 function writeJsonResponse(
   res: ServerResponse,
@@ -526,8 +532,7 @@ function serviceStatusPayload() {
       loaded: widgetHtml.length > 0,
     },
     mcp: {
-      ssePath,
-      postPath,
+      mcpPath,
       activeSessions: sessions.size,
     },
     storage: {
@@ -539,57 +544,50 @@ function serviceStatusPayload() {
   };
 }
 
-async function handleSseRequest(res: ServerResponse) {
+async function handleMcpRequest(req: IncomingMessage, res: ServerResponse) {
   res.setHeader("Access-Control-Allow-Origin", "*");
-  const server = createEcommerceServer();
-  const transport = new SSEServerTransport(postPath, res);
-  const sessionId = transport.sessionId;
+  res.setHeader("Access-Control-Allow-Headers", "content-type, mcp-session-id");
 
-  sessions.set(sessionId, { server, transport });
+  const sessionId = req.headers["mcp-session-id"] as string | undefined;
+  let record = sessionId ? sessions.get(sessionId) : undefined;
 
-  transport.onclose = async () => {
-    sessions.delete(sessionId);
-    await server.close();
-  };
+  if (!record) {
+    // New session
+    const server = createEcommerceServer();
+    const transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: () => randomUUID(),
+      onsessioninitialized: (id) => {
+        sessions.set(id, { server, transport });
+      },
+    });
 
-  transport.onerror = (err) => {
-    console.error("[SSE error]", err);
-  };
+    transport.onclose = () => {
+      if (transport.sessionId) {
+        sessions.delete(transport.sessionId);
+      }
+      void server.close();
+    };
 
-  try {
-    await server.connect(transport);
-  } catch (err) {
-    sessions.delete(sessionId);
-    console.error("[SSE connect error]", err);
-    if (!res.headersSent) {
-      res.writeHead(500).end("Failed to establish SSE connection");
+    transport.onerror = (err) => {
+      console.error("[MCP transport error]", err);
+    };
+
+    try {
+      await server.connect(transport);
+    } catch (err) {
+      console.error("[MCP connect error]", err);
+      if (!res.headersSent) res.writeHead(500).end("Failed to connect MCP server");
+      return;
     }
-  }
-}
 
-async function handlePostMessage(req: IncomingMessage, res: ServerResponse, url: URL) {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Headers", "content-type");
-
-  const sessionId = url.searchParams.get("sessionId");
-  if (!sessionId) {
-    res.writeHead(400).end("Missing sessionId");
-    return;
-  }
-
-  const session = sessions.get(sessionId);
-  if (!session) {
-    res.writeHead(404).end("Unknown session");
-    return;
+    record = { server, transport };
   }
 
   try {
-    await session.transport.handlePostMessage(req, res);
+    await record.transport.handleRequest(req, res);
   } catch (err) {
-    console.error("[POST message error]", err);
-    if (!res.headersSent) {
-      res.writeHead(500).end("Failed to process message");
-    }
+    console.error("[MCP handleRequest error]", err);
+    if (!res.headersSent) res.writeHead(500).end("MCP request failed");
   }
 }
 
@@ -604,11 +602,11 @@ const httpServer = createServer(async (req: IncomingMessage, res: ServerResponse
 
   const url = new URL(req.url, `http://${req.headers.host ?? "localhost"}`);
 
-  if (req.method === "OPTIONS" && (url.pathname === ssePath || url.pathname === postPath)) {
+  if (req.method === "OPTIONS" && url.pathname === mcpPath) {
     res.writeHead(204, {
       "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-      "Access-Control-Allow-Headers": "content-type",
+      "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
+      "Access-Control-Allow-Headers": "content-type, mcp-session-id",
     });
     res.end();
     return;
@@ -630,19 +628,18 @@ const httpServer = createServer(async (req: IncomingMessage, res: ServerResponse
       ...serviceStatusPayload(),
       documentation: {
         healthcheck: "/healthz",
-        mcpUrl: ssePath,
+        mcpUrl: mcpPath,
       },
     });
     return;
   }
 
-  if (req.method === "GET" && url.pathname === ssePath) {
-    await handleSseRequest(res);
-    return;
-  }
-
-  if (req.method === "POST" && url.pathname === postPath) {
-    await handlePostMessage(req, res, url);
+  // Streamable HTTP MCP: POST (new msg / new session), GET (SSE resumption), DELETE (close)
+  if (
+    (req.method === "POST" || req.method === "GET" || req.method === "DELETE") &&
+    url.pathname === mcpPath
+  ) {
+    await handleMcpRequest(req, res);
     return;
   }
 
@@ -657,8 +654,7 @@ httpServer.on("clientError", (err: Error, socket) => {
 export function startHttpServer(listenPort = port) {
   httpServer.listen(listenPort, () => {
     console.log(`🌺 Farm Rio Ecommerce MCP Server`);
-    console.log(`   SSE endpoint : http://localhost:${listenPort}${ssePath}`);
-    console.log(`   POST endpoint: http://localhost:${listenPort}${postPath}`);
+    console.log(`   MCP endpoint : http://localhost:${listenPort}${mcpPath}`);
     console.log(`   Healthcheck  : http://localhost:${listenPort}/healthz`);
     console.log(`   Session store: ${path.relative(ROOT_DIR, SESSION_STORE_PATH)}`);
     console.log(`   Analytics log: ${path.relative(ROOT_DIR, ANALYTICS_LOG_PATH)}`);
