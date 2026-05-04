@@ -153,6 +153,9 @@ const widgetHtml = readWidgetHtml();
 function descriptorMeta() {
   return {
     "ui/resourceUri": WIDGET_URI,
+    ui: {
+      resourceUri: WIDGET_URI,
+    },
     "openai/toolInvocation/invoking": "Abrindo a Farm Rio…",
     "openai/toolInvocation/invoked": "Widget Farm Rio pronto",
     "openai/widgetAccessible": true,
@@ -346,6 +349,7 @@ function createEcommerceServer(): Server {
           _meta: {
             ...descriptorMeta(),
             ui: {
+              resourceUri: WIDGET_URI,
               csp: {
                 connectDomains: widgetCspDomains.connectDomains,
                 resourceDomains: widgetCspDomains.resourceDomains,
