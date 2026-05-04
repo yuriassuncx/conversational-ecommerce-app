@@ -208,13 +208,16 @@ async function main() {
   ) as Record<
     string,
     {
-      cart: { orderFormId?: string };
+      cart: { orderFormId?: string; items?: Array<{ productId: string; size: string; quantity: number }> };
       wishlistProductIds: string[];
     }
   >;
 
   assert.ok(persistedSessions[sessionId], "Session must be persisted to disk");
-  assert.ok(persistedSessions[sessionId].cart.orderFormId, "Session must persist the live VTEX orderForm id");
+  assert.ok(
+    (persistedSessions[sessionId].cart.items?.length ?? 0) > 0,
+    "Session must persist local cart items"
+  );
   assert.equal(persistedSessions[sessionId].wishlistProductIds.length, 0);
 
   const analyticsEntries = readJsonLines(ANALYTICS_LOG_PATH);

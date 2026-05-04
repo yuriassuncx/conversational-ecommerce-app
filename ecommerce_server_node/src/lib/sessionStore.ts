@@ -10,6 +10,9 @@ export interface PersistedCartItem {
 
 export interface PersistedCart {
   orderFormId?: string;
+  items?: PersistedCartItem[];
+  couponCode?: string;
+  vendorCode?: string;
 }
 
 export interface PersistedSession {

@@ -1,83 +1,11 @@
-import { cloneProductForSize, getProductById, getProductsByIds } from "./farmRioLive.js";
+﻿import { cloneProductForSize, getProductsByIds } from "./farmRioLive.js";
 import { getSessionSnapshot, updateSession } from "./sessionStore.js";
 import type { Product } from "../data/products.js";
 
 const FARM_RIO_BASE_URL =
   process.env.FARM_RIO_VTEX_BASE_URL?.trim() || "https://www.farmrio.com.br";
-const CHECKOUT_BASE_URL = new URL("/api/checkout/pub/orderForm/", FARM_RIO_BASE_URL);
-const REQUEST_TIMEOUT_MS = 8_000;
 
-// Cookie jar: VTEX checkout uses cookies (checkout.vtex.com, etc.) to track
-// the orderForm session. We persist cookies per-process so calls stay coherent.
-const cookieJar = new Map<string, string>();
-
-function buildCookieHeader(): string {
-  return [...cookieJar.entries()].map(([k, v]) => `${k}=${v}`).join("; ");
-}
-
-function updateCookieJar(setCookieHeaders: string[]): void {
-  for (const header of setCookieHeaders) {
-    const [pair] = header.split(";");
-    if (!pair) continue;
-    const eq = pair.indexOf("=");
-    if (eq < 0) continue;
-    const name = pair.slice(0, eq).trim();
-    const value = pair.slice(eq + 1).trim();
-    if (name) cookieJar.set(name, value);
-  }
-}
-
-export interface VtexOrderFormMessage {
-  text?: string;
-}
-
-export interface VtexOrderFormItem {
-  id?: string | number;
-  productId?: string | number;
-  name?: string;
-  skuName?: string;
-  quantity?: number;
-  sellingPrice?: number;
-  price?: number;
-  listPrice?: number;
-  imageUrl?: string;
-  detailUrl?: string;
-  seller?: string;
-}
-
-export interface VtexOrderFormTotalizer {
-  id?: string;
-  value?: number;
-}
-
-export interface VtexOrderFormSla {
-  id?: string;
-  price?: number;
-  shippingEstimate?: string;
-}
-
-export interface VtexOrderFormLogisticsInfo {
-  selectedSla?: string;
-  slas?: VtexOrderFormSla[];
-}
-
-export interface VtexOrderFormShippingData {
-  logisticsInfo?: VtexOrderFormLogisticsInfo[];
-}
-
-export interface VtexOrderFormMarketingData {
-  coupon?: string | null;
-}
-
-export interface VtexOrderForm {
-  orderFormId: string;
-  items?: VtexOrderFormItem[];
-  totalizers?: VtexOrderFormTotalizer[];
-  value?: number;
-  shippingData?: VtexOrderFormShippingData | null;
-  marketingData?: VtexOrderFormMarketingData | null;
-  messages?: VtexOrderFormMessage[];
-}
+// ─── Types ─────────────────────────────────────────────────────────────────
 
 export interface RealCartItem {
   product: Product;
@@ -94,6 +22,8 @@ export interface RealCart {
   vendorDiscount?: number;
   shippingCost?: number;
   shippingEstimate?: string;
+  /** Direct VTEX checkout URL the user can open in their browser to purchase. */
+  checkoutUrl?: string;
 }
 
 export interface RealCartTotals {
@@ -111,266 +41,83 @@ export interface RealCartState {
   messages: string[];
 }
 
-function normalizeWhitespace(value: string): string {
-  return value.replace(/\s+/g, " ").trim();
-}
+// ─── Checkout URL builder ─────────────────────────────────────────────────
+//
+// Cloudflare blocks server-side requests to farmrio.com.br from datacenter
+// IPs regardless of headers. Instead of calling the VTEX orderForm API we
+// manage the cart locally and give users a direct VTEX checkout URL they can
+// open in their own browser where Cloudflare does not interfere.
 
-function toStringId(value: string | number | undefined): string {
-  return normalizeWhitespace(String(value ?? ""));
-}
-
-function centsToBrl(value?: number): number {
-  return (value ?? 0) / 100;
-}
-
-function totalizerValue(orderForm: VtexOrderForm, id: string): number {
-  return orderForm.totalizers?.find((entry) => entry.id === id)?.value ?? 0;
-}
-
-function formatShippingEstimate(estimate?: string): string | undefined {
-  if (!estimate) {
-    return undefined;
+function buildCheckoutUrl(
+  items: Array<{ sku: string; quantity: number }>,
+  coupon?: string
+): string {
+  const url = new URL("/checkout/cart/add", FARM_RIO_BASE_URL);
+  for (const item of items) {
+    url.searchParams.append("sku", item.sku);
+    url.searchParams.append("qty", String(item.quantity));
+    url.searchParams.append("seller", "1");
   }
-
-  const businessDays = estimate.match(/^(\d+)bd$/iu);
-  if (businessDays) {
-    const days = Number(businessDays[1]);
-    return `${days} dia${days === 1 ? " útil" : "s úteis"}`;
+  if (coupon) {
+    url.searchParams.set("coupon", coupon);
   }
-
-  return estimate;
+  return url.toString();
 }
 
-function absoluteUrl(path?: string): string | undefined {
-  if (!path) {
-    return undefined;
-  }
+// ─── Local cart → RealCartState ───────────────────────────────────────────
 
-  try {
-    return new URL(path, FARM_RIO_BASE_URL).toString();
-  } catch {
-    return undefined;
-  }
-}
+async function localCartToCartState(sessionId: string): Promise<RealCartState> {
+  const session = getSessionSnapshot(sessionId);
+  const localItems = session.cart.items ?? [];
 
-function messageTexts(orderForm: VtexOrderForm): string[] {
-  return (orderForm.messages ?? [])
-    .map((message) => normalizeWhitespace(message.text ?? ""))
-    .filter(Boolean);
-}
+  const productIds = [...new Set(localItems.map((i) => i.productId))];
+  const products = await getProductsByIds(productIds);
+  const productsById = new Map(products.map((p) => [p.id, p]));
 
-function selectedShipping(orderForm: VtexOrderForm): VtexOrderFormSla | null {
-  const logistics = orderForm.shippingData?.logisticsInfo ?? [];
-  for (const entry of logistics) {
-    const selected = entry.slas?.find((sla) => sla.id === entry.selectedSla);
-    if (selected) {
-      return selected;
-    }
+  const items: RealCartItem[] = localItems
+    .map((stored) => {
+      const base = productsById.get(stored.productId);
+      if (!base) return null;
+      const product = cloneProductForSize(base, stored.size);
+      return { product, size: stored.size, quantity: stored.quantity };
+    })
+    .filter((item): item is RealCartItem => item !== null);
 
-    if (entry.slas?.[0]) {
-      return entry.slas[0];
-    }
-  }
+  const couponCode = session.cart.couponCode;
+  const vendorCode = session.cart.vendorCode;
+  const subtotal = items.reduce((sum, i) => sum + i.product.price * i.quantity, 0);
+  const total = subtotal; // coupons require VTEX; reflected in checkout URL
 
-  return null;
-}
+  const skuItems = localItems
+    .map((stored) => {
+      const base = productsById.get(stored.productId);
+      const sku = base?.sizeSkuMap?.[stored.size] ?? base?.sku ?? stored.productId;
+      return { sku, quantity: stored.quantity };
+    })
+    .filter((i) => Boolean(i.sku));
 
-async function invokeCheckout<T>(
-  path: string,
-  init: Omit<RequestInit, "signal"> & { body?: string }
-): Promise<T> {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-
-  try {
-    const cookieHeader = buildCookieHeader();
-    const response = await fetch(new URL(path, CHECKOUT_BASE_URL), {
-      ...init,
-      headers: {
-        accept: "application/json",
-        "content-type": "application/json",
-        origin: FARM_RIO_BASE_URL,
-        referer: `${FARM_RIO_BASE_URL}/`,
-        "user-agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        ...(cookieHeader ? { cookie: cookieHeader } : {}),
-        ...(init.headers ?? {}),
-      },
-      signal: controller.signal,
-    });
-
-    // Persist any Set-Cookie headers returned by VTEX
-    const setCookies = response.headers.getSetCookie?.() ?? [];
-    if (setCookies.length > 0) {
-      updateCookieJar(setCookies);
-    }
-
-    if (!response.ok) {
-      const body = await response.text().catch(() => "");
-      throw new Error(`Farm Rio checkout ${path} failed with ${response.status}: ${body.slice(0, 200)}`);
-    }
-
-    return (await response.json()) as T;
-  } finally {
-    clearTimeout(timeoutId);
-  }
-}
-
-async function createOrderForm(): Promise<VtexOrderForm> {
-  return invokeCheckout<VtexOrderForm>("", {
-    method: "POST",
-    body: "{}",
-  });
-}
-
-async function getOrderForm(orderFormId: string): Promise<VtexOrderForm> {
-  return invokeCheckout<VtexOrderForm>(`${orderFormId}`, {
-    method: "GET",
-  });
-}
-
-function persistOrderFormId(sessionId: string, orderFormId: string) {
-  updateSession(sessionId, (session) => {
-    session.cart.orderFormId = orderFormId;
-  });
-}
-
-async function ensureOrderForm(sessionId: string): Promise<VtexOrderForm> {
-  const currentOrderFormId = getSessionSnapshot(sessionId).cart.orderFormId;
-
-  if (currentOrderFormId) {
-    try {
-      return await getOrderForm(currentOrderFormId);
-    } catch (error) {
-      console.warn("existing orderForm lookup failed; creating a fresh VTEX orderForm", error);
-    }
-  }
-
-  const orderForm = await createOrderForm();
-  persistOrderFormId(sessionId, orderForm.orderFormId);
-  return orderForm;
-}
-
-function deriveSize(product: Product | undefined, item: VtexOrderFormItem): string {
-  const skuId = toStringId(item.id);
-  if (product?.sizeSkuMap) {
-    const matchedSize = Object.entries(product.sizeSkuMap).find(([, mappedSku]) => mappedSku === skuId)?.[0];
-    if (matchedSize) {
-      return matchedSize;
-    }
-  }
-
-  const skuName = normalizeWhitespace(item.skuName ?? "");
-  const suffix = skuName.split(" - ").at(-1);
-  if (suffix && product?.sizes.includes(suffix)) {
-    return suffix;
-  }
-
-  if (product?.sizes.length === 1) {
-    return product.sizes[0] ?? "U";
-  }
-
-  return "U";
-}
-
-function buildOrderFormProduct(item: VtexOrderFormItem, size: string): Product {
-  const skuId = toStringId(item.id);
-  const image = normalizeWhitespace(item.imageUrl ?? "");
-  const price = centsToBrl(item.sellingPrice ?? item.price);
-
-  return {
-    id: skuId,
-    productID: skuId,
-    sku: skuId,
-    gtin: "",
-    name: normalizeWhitespace(item.name ?? skuId),
-    description: normalizeWhitespace(item.name ?? skuId),
-    shortDescription: normalizeWhitespace(item.name ?? skuId),
-    price,
-    compareAtPrice: undefined,
-    image,
-    gallery: image ? [image] : undefined,
-    category: "outro",
-    tags: [],
-    sizes: size ? [size] : [],
-    color: "",
-    installments: undefined,
-    inStock: true,
-    brand: "Farm Rio",
-    url: absoluteUrl(item.detailUrl),
-    sizeSkuMap: size ? { [size]: skuId } : undefined,
-  };
-}
-
-async function orderFormToCartState(orderForm: VtexOrderForm): Promise<RealCartState> {
-  const orderItems = orderForm.items ?? [];
-  const products = await getProductsByIds(orderItems.map((item) => toStringId(item.id)).filter(Boolean));
-  const productsById = new Map(products.map((product) => [product.id, product]));
-
-  const items: RealCartItem[] = orderItems.map((item) => {
-    const itemId = toStringId(item.id);
-    const knownProduct = productsById.get(itemId);
-    const size = deriveSize(knownProduct, item);
-    const baseProduct = knownProduct ? cloneProductForSize(knownProduct, size) : buildOrderFormProduct(item, size);
-    const sellingPrice = centsToBrl(item.sellingPrice ?? item.price);
-    const compareAtPrice = centsToBrl(item.listPrice);
-
-    return {
-      product: {
-        ...baseProduct,
-        price: sellingPrice,
-        compareAtPrice: compareAtPrice > sellingPrice ? compareAtPrice : baseProduct.compareAtPrice,
-        image: normalizeWhitespace(item.imageUrl ?? baseProduct.image),
-        url: absoluteUrl(item.detailUrl) ?? baseProduct.url,
-      },
-      size,
-      quantity: item.quantity ?? 0,
-    };
-  });
-
-  const subtotal = centsToBrl(totalizerValue(orderForm, "Items"));
-  const couponSavings = Math.abs(centsToBrl(totalizerValue(orderForm, "Discounts")));
-  const shipping = centsToBrl(totalizerValue(orderForm, "Shipping"));
-  const shippingChoice = selectedShipping(orderForm);
+  const checkoutUrl =
+    skuItems.length > 0 ? buildCheckoutUrl(skuItems, couponCode) : undefined;
 
   const cart: RealCart = {
     items,
-    orderFormId: orderForm.orderFormId,
-    couponCode: normalizeWhitespace(orderForm.marketingData?.coupon ?? "") || undefined,
-    shippingCost: shipping > 0 ? shipping : undefined,
-    shippingEstimate: formatShippingEstimate(shippingChoice?.shippingEstimate),
+    couponCode,
+    vendorCode,
+    checkoutUrl,
   };
 
   return {
     cart,
-    totals: {
-      subtotal,
-      couponSavings,
-      vendorSavings: 0,
-      shipping,
-      total: centsToBrl(orderForm.value),
-    },
-    orderFormId: orderForm.orderFormId,
-    messages: messageTexts(orderForm),
+    totals: { subtotal, couponSavings: 0, vendorSavings: 0, shipping: 0, total },
+    orderFormId: sessionId,
+    messages: [],
   };
 }
 
-function addItemsBody(product: Product, size: string, quantity: number): string {
-  const sku = product.sizeSkuMap?.[size] ?? product.sku;
-  return JSON.stringify({
-    orderItems: [
-      {
-        id: sku,
-        quantity,
-        seller: "1",
-      },
-    ],
-  });
-}
+// ─── Public API ────────────────────────────────────────────────────────────
 
 export async function viewRealCart(sessionId: string): Promise<RealCartState> {
-  const orderForm = await ensureOrderForm(sessionId);
-  return orderFormToCartState(orderForm);
+  return localCartToCartState(sessionId);
 }
 
 export async function addRealCartItem(
@@ -379,14 +126,20 @@ export async function addRealCartItem(
   size: string,
   quantity: number
 ): Promise<RealCartState> {
-  const orderForm = await ensureOrderForm(sessionId);
-  const updatedOrderForm = await invokeCheckout<VtexOrderForm>(`${orderForm.orderFormId}/items`, {
-    method: "POST",
-    body: addItemsBody(product, size, quantity),
+  updateSession(sessionId, (session) => {
+    const items = session.cart.items ?? [];
+    const existing = items.find(
+      (i) => i.productId === product.id && i.size === size
+    );
+    if (existing) {
+      existing.quantity += quantity;
+    } else {
+      items.push({ productId: product.id, size, quantity });
+    }
+    session.cart.items = items;
   });
 
-  persistOrderFormId(sessionId, updatedOrderForm.orderFormId);
-  return orderFormToCartState(updatedOrderForm);
+  return localCartToCartState(sessionId);
 }
 
 export async function updateRealCartItemQuantity(
@@ -394,32 +147,17 @@ export async function updateRealCartItemQuantity(
   itemId: string,
   nextQuantity: number
 ): Promise<RealCartState> {
-  const orderForm = await ensureOrderForm(sessionId);
-  const normalizedItemId = normalizeWhitespace(itemId);
-  const itemIndex = (orderForm.items ?? []).findIndex(
-    (item) =>
-      toStringId(item.id) === normalizedItemId ||
-      toStringId(item.productId) === normalizedItemId
-  );
-
-  if (itemIndex < 0) {
-    return orderFormToCartState(orderForm);
-  }
-
-  const updatedOrderForm = await invokeCheckout<VtexOrderForm>(`${orderForm.orderFormId}/items`, {
-    method: "PATCH",
-    body: JSON.stringify({
-      orderItems: [
-        {
-          index: itemIndex,
-          quantity: nextQuantity,
-        },
-      ],
-    }),
+  updateSession(sessionId, (session) => {
+    const items = session.cart.items ?? [];
+    if (nextQuantity <= 0) {
+      session.cart.items = items.filter((i) => i.productId !== itemId);
+    } else {
+      const item = items.find((i) => i.productId === itemId);
+      if (item) item.quantity = nextQuantity;
+    }
   });
 
-  persistOrderFormId(sessionId, updatedOrderForm.orderFormId);
-  return orderFormToCartState(updatedOrderForm);
+  return localCartToCartState(sessionId);
 }
 
 export async function removeRealCartItem(
@@ -429,45 +167,32 @@ export async function removeRealCartItem(
   return updateRealCartItemQuantity(sessionId, itemId, 0);
 }
 
-async function applyCodeToOrderForm(sessionId: string, code: string): Promise<RealCartState> {
-  const orderForm = await ensureOrderForm(sessionId);
-  const updatedOrderForm = await invokeCheckout<VtexOrderForm>(`${orderForm.orderFormId}/coupons`, {
-    method: "POST",
-    body: JSON.stringify({ text: code }),
+export async function applyRealCouponCode(
+  sessionId: string,
+  code: string
+): Promise<RealCartState> {
+  updateSession(sessionId, (session) => {
+    session.cart.couponCode = code.trim() || undefined;
   });
-
-  persistOrderFormId(sessionId, updatedOrderForm.orderFormId);
-  return orderFormToCartState(updatedOrderForm);
+  return localCartToCartState(sessionId);
 }
 
-export async function applyRealCouponCode(sessionId: string, code: string): Promise<RealCartState> {
-  return applyCodeToOrderForm(sessionId, code);
-}
-
-export async function applyRealVendorCode(sessionId: string, code: string): Promise<RealCartState> {
-  return applyCodeToOrderForm(sessionId, code);
-}
-
-export async function applyRealShippingPostalCode(sessionId: string, cep: string): Promise<RealCartState> {
-  const orderForm = await ensureOrderForm(sessionId);
-
-  if ((orderForm.items ?? []).length === 0) {
-    return orderFormToCartState(orderForm);
-  }
-
-  const normalizedCep = normalizeWhitespace(cep).replace(/\D/g, "");
-  const updatedOrderForm = await invokeCheckout<VtexOrderForm>(`${orderForm.orderFormId}/attachments/shippingData`, {
-    method: "POST",
-    body: JSON.stringify({
-      selectedAddresses: [
-        {
-          postalCode: normalizedCep,
-          country: "BRA",
-        },
-      ],
-    }),
+export async function applyRealVendorCode(
+  sessionId: string,
+  code: string
+): Promise<RealCartState> {
+  updateSession(sessionId, (session) => {
+    session.cart.vendorCode = code.trim() || undefined;
   });
+  return localCartToCartState(sessionId);
+}
 
-  persistOrderFormId(sessionId, updatedOrderForm.orderFormId);
-  return orderFormToCartState(updatedOrderForm);
+export async function applyRealShippingPostalCode(
+  sessionId: string,
+  _cep: string
+): Promise<RealCartState> {
+  // Shipping calculation requires a VTEX browser session which is not
+  // available server-side. Return the current cart unchanged; the checkout
+  // URL will handle shipping in the user's browser.
+  return localCartToCartState(sessionId);
 }

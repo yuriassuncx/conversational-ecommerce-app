@@ -91,20 +91,20 @@ export async function handleAddToCart(raw: unknown) {
     args.quantity
   );
 
+  const checkoutUrl = cart.checkoutUrl;
+  const baseMessage =
+    messages[0] ??
+    `"${product.name}" (${args.size}) adicionado ao carrinho. Subtotal: R$ ${totals.subtotal.toFixed(2)}`;
+  const textMessage = checkoutUrl
+    ? `${baseMessage}\n\nFinalizar compra: ${checkoutUrl}`
+    : baseMessage;
+
   return {
-    content: [
-      {
-        type: "text" as const,
-        text:
-          messages[0] ??
-          `"${product.name}" (${args.size}) adicionado ao carrinho. Total: R$ ${totals.total.toFixed(2)}`,
-      },
-    ],
+    content: [{ type: "text" as const, text: textMessage }],
     structuredContent: {
       view: "cart",
-      message:
-        messages[0] ??
-        `"${product.name}" (${args.size}) adicionado ao carrinho.`,
+      message: baseMessage,
+      checkoutUrl,
       cart,
       totals,
     },
